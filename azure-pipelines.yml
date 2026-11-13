@@ -19,7 +19,7 @@ trigger:
   branches:
     include: [main]
   paths:
-    exclude: ["**/*.md", docs/*, .github/*]
+    exclude: ["*.md", "**/*.md", docs/*, .github/*]
 
 pr:
   branches:
@@ -212,7 +212,14 @@ stages:
                       done
                       [ -n "$ok" ] || rollback "Smoke test /health/ready failed"
 
-                      curl -s --max-time 10 "http://$ip/" | grep -q "build $(imageTag)" \
-                        || rollback "Home page does not show build $(imageTag)"
+                      # Fetch into a variable first: `curl | grep -q` under pipefail is racy
+                      # (grep exits early -> curl gets SIGPIPE -> false failure; seen in run 114).
+                      shown=""
+                      for i in $(seq 1 6); do
+                        home="$(curl -s --max-time 20 "http://$ip/" || true)"
+                        if grep -q "build $(imageTag)" <<<"$home"; then shown=1; break; fi
+                        sleep 5
+                      done
+                      [ -n "$shown" ] || rollback "Home page does not show build $(imageTag)"
                       echo "Deployed $image - healthy and serving build $(imageTag)"
                       kubectl -n $ns rollout history deploy/eshop-web | tail -5
