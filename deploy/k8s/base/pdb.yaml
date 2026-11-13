@@ -1,0 +1,9 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eshop-web
+spec:
+  minAvailable: 1                 # node drains/upgrades keep the app serving
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: eshop-web

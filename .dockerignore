@@ -1,9 +1,30 @@
-.dockerignore
+# Keep the build context small and free of secrets / local state.
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+**/*.user
+**/.idea/
+.git/
+.github/
+.devcontainer/
+.aspire/
+.claude/
+.nmbl/
 .env
-.git
-.gitignore
-.vs
-.vscode
-*/bin
-*/obj
-**/.toolstarget
+**/.env
+**/node_modules/
+**/TestResults/
+
+# Not needed to build the Web image
+tests/
+docs/
+infra/
+deploy/
+**/*.md
+azure-pipelines.yml
+docker-compose*
+src/PublicApi/
+src/eShopWeb.AppHost/
+# Committed sample data-protection key - never bake keys into images
+src/Web/key-*.xml

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eshop-web-config
+data:
+  # "Docker" is the app's own environment name for "run without Azure SQL/Key Vault".
+  ASPNETCORE_ENVIRONMENT: Docker
+  # EF Core in-memory provider instead of SQL Server (documented trade-off).
+  UseOnlyInMemoryDatabase: "true"
+  # The Aspire Seq exporter is not used here; its health check would crash startup.
+  Aspire__Seq__DisableHealthChecks: "true"
+  Logging__LogLevel__Default: Information

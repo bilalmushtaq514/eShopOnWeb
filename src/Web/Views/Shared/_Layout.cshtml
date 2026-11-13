@@ -24,6 +24,10 @@
     </environment>
 </head>
 <body>
+    @* [AKS deployment] Build banner: proves which image version (and which pod) served the page. *@
+    <div id="build-banner" style="background:#1b1b1b;color:#9fe870;font:12px/1.8 monospace;text-align:right;padding:0 12px;">
+        build @(Environment.GetEnvironmentVariable("APP_VERSION") ?? "local-dev") &middot; pod @Environment.MachineName
+    </div>
     <div class="esh-app-wrapper">
         <header class="esh-app-header">
             <div class="container">

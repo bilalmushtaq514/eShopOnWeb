@@ -1,0 +1,14 @@
+# Only the app port is reachable; enforced by Cilium (network_policy = "cilium").
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: eshop-web-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: eshop-web
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080

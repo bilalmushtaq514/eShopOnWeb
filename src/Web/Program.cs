@@ -125,6 +125,12 @@ app.MapControllerRoute("default", "{controller:slugify=Home}/{action:slugify=Ind
 app.MapRazorPages();
 app.MapHealthChecks("home_page_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("homePageHealthCheck") });
 app.MapHealthChecks("api_health_check", new HealthCheckOptions { Predicate = check => check.Tags.Contains("apiHealthCheck") });
+// [AKS deployment] Kubernetes probe endpoints. The existing /health also checks the
+// separate PublicApi service, which this deployment does not run, so probes use:
+//   /health/live  - process is up (no dependency checks)  -> livenessProbe
+//   /health/ready - home page renders from the catalog     -> readinessProbe + pipeline smoke test
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("homePageHealthCheck") });
 //endpoints.MapBlazorHub("/admin");
 app.MapFallbackToFile("index.html");
 

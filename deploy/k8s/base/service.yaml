@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: eshop-web
+  labels:
+    app.kubernetes.io/name: eshop-web
+  annotations:
+    # Stable public FQDN: <label>.<region>.cloudapp.azure.com
+    service.beta.kubernetes.io/azure-dns-label-name: eshop-hybrid-dev
+spec:
+  type: LoadBalancer
+  # Local: preserves the client IP (needed for ClientIP affinity) and avoids a second hop.
+  externalTrafficPolicy: Local
+  # Each pod has its own in-memory DB + data-protection key ring, so a browser
+  # must stick to one pod for basket/antiforgery to work (documented trade-off).
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+  selector:
+    app.kubernetes.io/name: eshop-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

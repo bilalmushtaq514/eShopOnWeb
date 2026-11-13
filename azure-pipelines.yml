@@ -1,0 +1,218 @@
+# =============================================================================
+# eShopOnWeb (.NET 10) -> AKS
+#
+#   Build_Test_Package  (every push + every PR)
+#     restore -> build -> test (+coverage) -> vuln scan -> docker build -> Trivy
+#     push to ACR as <BuildId>-<sha7>     (main only; PRs never push)
+#   Deploy_AKS_dev      (main only, Azure DevOps Environment "aks-dev")
+#     kustomize set image -> kubectl apply -> rollout status -> smoke test
+#     any failure -> kubectl rollout undo -> pipeline fails
+#
+# Secrets: none. Azure access = service connection "sc-azure-apps"
+# (workload identity federation / OIDC, no stored secret). Non-secret platform
+# names come from the "platform-dev" variable group.
+# =============================================================================
+
+name: eshop-web-$(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    exclude: ["**/*.md", docs/*, .github/*]
+
+pr:
+  branches:
+    include: [main]
+
+variables:
+  - group: platform-dev                # ACR_NAME, AKS_NAME, AKS_RESOURCE_GROUP (non-secret)
+  - name: azureServiceConnection
+    value: sc-azure-apps
+  - name: imageRepository
+    value: eshop-web
+  - name: buildConfiguration
+    value: Release
+  - name: isMain
+    value: ${{ eq(variables['Build.SourceBranch'], 'refs/heads/main') }}
+
+stages:
+  # ---------------------------------------------------------------------------
+  - stage: Build_Test_Package
+    displayName: Build, test & package
+    jobs:
+      - job: build
+        displayName: Build / test / image
+        pool:
+          vmImage: ubuntu-24.04
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - bash: |
+              set -euo pipefail
+              tag="$(Build.BuildId)-$(echo "$(Build.SourceVersion)" | cut -c1-7)"
+              echo "Image tag: $tag"
+              echo "##vso[task.setvariable variable=imageTag;isOutput=true]$tag"
+              echo "##vso[task.setvariable variable=imageTag]$tag"
+            name: meta
+            displayName: Compute immutable image tag
+
+          - task: UseDotNet@2
+            displayName: Use .NET SDK from global.json
+            inputs:
+              packageType: sdk
+              useGlobalJson: true
+
+          # Only what this pipeline ships/tests (the Aspire AppHost and PublicApi are not deployed).
+          - bash: |
+              set -euo pipefail
+              for p in src/Web/Web.csproj tests/UnitTests/UnitTests.csproj tests/IntegrationTests/IntegrationTests.csproj tests/FunctionalTests/FunctionalTests.csproj; do
+                dotnet restore "$p"
+                dotnet build "$p" -c $(buildConfiguration) --no-restore
+              done
+            displayName: dotnet restore + build
+
+          # EndToEndTests (Playwright, needs a running site) and PublicApiIntegrationTests
+          # (needs the PublicApi host, not deployed here) are intentionally excluded.
+          - bash: |
+              set -euo pipefail
+              for p in UnitTests IntegrationTests FunctionalTests; do
+                dotnet test "tests/$p/$p.csproj" -c $(buildConfiguration) --no-build \
+                  --logger "trx;LogFilePrefix=$p" --results-directory "$(Agent.TempDirectory)/TestResults" \
+                  --collect "XPlat Code Coverage"
+              done
+            displayName: dotnet test (unit, integration, functional)
+
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: $(Agent.TempDirectory)/TestResults/**/*.trx
+              mergeTestResults: true
+              testRunTitle: eShopOnWeb $(Build.BuildNumber)
+
+          - task: PublishCodeCoverageResults@2
+            displayName: Publish code coverage
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: $(Agent.TempDirectory)/TestResults/**/coverage.cobertura.xml
+
+          - script: |
+              dotnet list src/Web/Web.csproj package --vulnerable --include-transitive 2>&1 | tee $(Agent.TempDirectory)/vulnerable.txt
+              if grep -qE "Critical" $(Agent.TempDirectory)/vulnerable.txt; then
+                echo "##vso[task.logissue type=warning]Critical vulnerable NuGet packages found (see log)"
+              fi
+            displayName: NuGet vulnerability report
+
+          - script: >
+              docker build -f src/Web/Dockerfile
+              --build-arg BUILD_VERSION=$(imageTag)
+              -t $(imageRepository):$(imageTag) .
+            displayName: docker build (multi-stage)
+
+          - script: |
+              set -euo pipefail
+              docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.1 image \
+                --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+                $(imageRepository):$(imageTag)
+            displayName: Trivy image scan (fail on fixable CRITICAL)
+
+          - task: AzureCLI@2
+            displayName: Push image to ACR (main only)
+            condition: and(succeeded(), eq(variables.isMain, 'True'), ne(variables['Build.Reason'], 'PullRequest'))
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az acr login --name "$(ACR_NAME)"
+                image="$(ACR_NAME).azurecr.io/$(imageRepository):$(imageTag)"
+                docker tag "$(imageRepository):$(imageTag)" "$image"
+                docker push "$image"
+                echo "Pushed $image"
+
+          # Manifests travel with the run as an artifact, so the deploy stage
+          # applies exactly what was reviewed in this commit (built once, promoted).
+          - publish: deploy/k8s
+            artifact: manifests
+            displayName: Publish k8s manifests
+
+  # ---------------------------------------------------------------------------
+  - stage: Deploy_AKS_dev
+    displayName: Deploy to AKS (dev)
+    dependsOn: Build_Test_Package
+    condition: and(succeeded(), eq(variables.isMain, 'True'), ne(variables['Build.Reason'], 'PullRequest'))
+    variables:
+      imageTag: $[ stageDependencies.Build_Test_Package.build.outputs['meta.imageTag'] ]
+    jobs:
+      - deployment: deploy
+        displayName: Rolling update eshop-web
+        pool:
+          vmImage: ubuntu-24.04
+        environment: aks-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: manifests
+
+                - task: KubeloginInstaller@0
+                  displayName: Install kubelogin (Entra ID auth to AKS)
+
+                - task: AzureCLI@2
+                  displayName: Apply, wait for rollout, smoke test
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      ns=eshop
+                      image="$(ACR_NAME).azurecr.io/$(imageRepository):$(imageTag)"
+
+                      az aks get-credentials -g "$(AKS_RESOURCE_GROUP)" -n "$(AKS_NAME)" --overwrite-existing
+                      kubelogin convert-kubeconfig -l azurecli   # local accounts are disabled on the cluster
+
+                      rollback() {
+                        echo "##vso[task.logissue type=error]$1 - rolling back"
+                        kubectl -n $ns get pods -o wide || true
+                        kubectl -n $ns describe deploy/eshop-web | tail -25 || true
+                        kubectl -n $ns rollout undo deploy/eshop-web || true
+                        kubectl -n $ns rollout status deploy/eshop-web --timeout=180s || true
+                        exit 1
+                      }
+
+                      cd "$(Pipeline.Workspace)/manifests/overlays/dev"
+                      kustomize edit set image "eshop-web=$image"
+                      kubectl apply -k .
+                      kubectl -n $ns annotate deploy/eshop-web kubernetes.io/change-cause="$(Build.BuildNumber) $image" --overwrite
+
+                      # A-5: readiness probes gate the rollout; old pods keep serving until new ones are Ready.
+                      kubectl -n $ns rollout status deploy/eshop-web --timeout=240s || rollback "Rollout did not become ready"
+
+                      # Public endpoint (Azure LB). Wait for it on first deploy.
+                      for i in $(seq 1 30); do
+                        ip="$(kubectl -n $ns get svc eshop-web -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+                        [ -n "$ip" ] && break; sleep 10
+                      done
+                      [ -n "$ip" ] || rollback "Service has no external IP"
+                      echo "Public endpoint: http://$ip  (http://eshop-hybrid-dev.$(az aks show -g "$(AKS_RESOURCE_GROUP)" -n "$(AKS_NAME)" --query location -o tsv).cloudapp.azure.com)"
+
+                      # Smoke test from outside the cluster, through the public LB.
+                      ok=""
+                      for i in $(seq 1 12); do
+                        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://$ip/health/ready" || true)"
+                        echo "attempt $i: /health/ready -> $code"
+                        if [ "$code" = "200" ]; then ok=1; break; fi
+                        sleep 10
+                      done
+                      [ -n "$ok" ] || rollback "Smoke test /health/ready failed"
+
+                      curl -s --max-time 10 "http://$ip/" | grep -q "build $(imageTag)" \
+                        || rollback "Home page does not show build $(imageTag)"
+                      echo "Deployed $image - healthy and serving build $(imageTag)"
+                      kubectl -n $ns rollout history deploy/eshop-web | tail -5
