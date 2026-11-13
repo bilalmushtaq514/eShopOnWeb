@@ -74,7 +74,7 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /health/ready, port: http }
+            httpGet: { path: /health/does-not-exist, port: http }   # DEMO: deliberately broken
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
