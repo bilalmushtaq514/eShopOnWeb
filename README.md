@@ -1,3 +1,24 @@
+> ## DevOps assessment fork
+>
+> This fork runs the **Web** app on **AKS** via Azure DevOps. Platform, architecture and pipeline docs: **[bilalmushtaq514/platform-infra](https://github.com/bilalmushtaq514/platform-infra)**.
+>
+> **.NET version:** .NET 10 (LTS, supported until Nov 2028) - no lifecycle caveat needed.
+>
+> **Changes made in this fork** (no application logic changed):
+>
+> | File | Change |
+> |---|---|
+> | `src/Web/Dockerfile` | Multi-stage, cached restore layer, non-root (`$APP_UID`), build version baked in as `APP_VERSION` |
+> | `.dockerignore` | Minimal build context (no tests/docs/secrets/sample data-protection key) |
+> | `src/Web/Program.cs` | `/health/live` (no dependencies) + `/health/ready` (home page renders) for Kubernetes probes; existing `/health` unchanged |
+> | `src/Web/Views/Shared/_Layout.cshtml` | Build + pod banner (proves deployments and load balancing) |
+> | `deploy/k8s/` | Kustomize base + `dev` overlay: Deployment x2, probes, limits, PDB, NetworkPolicy, restricted PSA, LoadBalancer Service |
+> | `azure-pipelines.yml` | Build -> test + coverage -> scan -> ACR (`<BuildId>-<sha>`) -> AKS rollout + smoke test + auto-undo |
+>
+> Runtime config (Kubernetes ConfigMap): `ASPNETCORE_ENVIRONMENT=Docker`, `UseOnlyInMemoryDatabase=true`, `Aspire__Seq__DisableHealthChecks=true`.
+
+---
+
 # Microsoft eShopOnWeb ASP.NET Core Reference Application
 
 This Microsoft reference application is now being maintained by [NimblePros](https://nimblepros.com/).
